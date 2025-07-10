@@ -1,18 +1,64 @@
+use crate::config::Config;
+use crate::transmitter::Transmitter;
+use std::fmt;
+use std::time::Duration;
+use std::thread;
+use serialport::prelude::*;
+
+// Frame start byte
 const MMDVM_FRAME_START: u8 = 0xE0;
+
+// MMDVM command codes
 const MMDVM_GET_VERSION: u8 = 0x00;
 const MMDVM_SET_CONFIG:  u8 = 0x02;
 const MMDVM_SET_MODE:    u8 = 0x03;
 const MMDVM_SET_FREQ:    u8 = 0x04;
 const MMDVM_POCSAG_DATA: u8 = 0x50;
 const MMDVM_MODE_IDLE:   u8 = 0x00;
+
+// MMDVM command response codes
 const MMDVM_ACK:         u8 = 0x70;
 const MMDVM_NACK:        u8 = 0x7F;
 
-use crate::config::Config;
-use crate::transmitter::Transmitter;
-use std::time::Duration;
-use std::thread;
-use serialport::prelude::*;
+// NACK reason codes
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MmdvmNackReason {
+    BadCommand,
+    WrongMode,
+    CommandTooLong,
+    DataIncorrect,
+    BufferFull,
+    Unknown(u8)
+}
+
+impl From<u8> for MmdvmNackReason {
+    fn from(value: u8) -> MmdvmNackReason {
+        match value {
+            1 => MmdvmNackReason::BadCommand,
+            2 => MmdvmNackReason::WrongMode,
+            3 => MmdvmNackReason::CommandTooLong,
+            4 => MmdvmNackReason::DataIncorrect,
+            5 => MmdvmNackReason::BufferFull,
+            _ => MmdvmNackReason::Unknown(value)
+        }
+    }
+}
+
+impl fmt::Display for MmdvmNackReason {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let name = match *self {
+            MmdvmNackReason::BadCommand => "Bad command".to_owned(),
+            MmdvmNackReason::WrongMode => "Wrong mode".to_owned(),
+            MmdvmNackReason::CommandTooLong => "Command too long".to_owned(),
+            MmdvmNackReason::DataIncorrect => "Data incorrect".to_owned(),
+            MmdvmNackReason::BufferFull => "Buffer full, enhance your calm".to_owned(),
+            MmdvmNackReason::Unknown(val) => format!("Unknown NACK reason, value {val}")
+        };
+        write!(f, "{}", name)
+    }
+}
+impl std::error::Error for MmdvmNackReason {}
+
 
 pub struct MMDVMTransmitter {
     serial: Box<dyn SerialPort>
@@ -43,7 +89,8 @@ impl MMDVMTransmitter {
 
         self.send_cmd(MMDVM_GET_VERSION, &[]);
 
-        // TODO FIXME: This does not look like it'll work very well. Should read the header, length, command code, then read 'length' bytes 
+        // FIXME: This could be improved by reading the header then waiting until we have the whole payload.
+        // This seems like it would only work if the whole packet was already in the buffer.
         let mut buffer = [0; 2000];
         if !self.serial.read(&mut buffer[..]).is_err() {
             match &buffer[0..4] {
@@ -53,7 +100,7 @@ impl MMDVMTransmitter {
               _ => warn!("Unknown frame received")
             }
         } else {
-            error!("Error when reading from the modem");
+            error!("Error when reading from the MMDVM");
         }
 
         self.send_cmd(MMDVM_SET_CONFIG, &[
@@ -95,8 +142,7 @@ impl MMDVMTransmitter {
             level as u8
         ]);
 
-        // TODO: Check that the result packet is an ACK
-        let _ = self.read_result();
+        _ = self.read_result();
 
         self.send_cmd(MMDVM_SET_FREQ, &[
             0x0,
@@ -110,8 +156,7 @@ impl MMDVMTransmitter {
             0x2C, 0xAD, 0x39, 0x1A,
         ]);
 
-        // TODO: Check that the result packet is an ACK
-        let _ = self.read_result();
+        _ = self.read_result();
     }
 
     pub fn send_cmd(&mut self, cmd: u8, data: &[u8]) {
@@ -136,7 +181,7 @@ impl MMDVMTransmitter {
         }
     }
 
-    pub fn read_result(&mut self) -> Result<u8, Option<u8>> {
+    pub fn read_result(&mut self) -> Result<u8, Option<MmdvmNackReason>> {
         let mut buffer = [0; 2000];
 
         for _ in 0..50 {
@@ -155,11 +200,13 @@ impl MMDVMTransmitter {
                     Ok(*ftype)
                 }
                 [MMDVM_FRAME_START, _, MMDVM_NACK, ftype] => {
-                    warn!("Received NACK ({:?}): {:?}", ftype, buffer.get(4));
                     if let Some(err) = buffer.get(4) {
-                        Err(Some(*err))
+                        let nack = MmdvmNackReason::from(*err);
+                        warn!("Received NACK ({:?}): {err} => {nack}", ftype);
+                        Err(Some(nack))
                     }
                     else {
+                        warn!("Received NACK ({:?}) without a reason code?", ftype);
                         Err(None)
                     }
                 }
@@ -195,15 +242,15 @@ impl Transmitter for MMDVMTransmitter {
             }
 
             if !buffer.is_empty() {
-                let start = [
+                let packet_header = [
                     MMDVM_FRAME_START,
-                    (buffer.len() + 3) as u8,
+                    (buffer.len() + 3) as u8,   // packet length includes the frame start, length and command bytes
                     MMDVM_POCSAG_DATA as u8,
                 ];
 
-                let mut result = Err(Some(5));
-                while result == Err(Some(5)) {
-                    if self.serial.write_all(&start).is_err() {
+                let mut result = Err(Some(MmdvmNackReason::BufferFull));
+                while result == Err(Some(MmdvmNackReason::BufferFull)) {
+                    if self.serial.write_all(&packet_header).is_err() {
                         error!("Unable to intialize MMDVM!");
                     }
 
@@ -225,7 +272,6 @@ impl Transmitter for MMDVMTransmitter {
 
         self.send_cmd(MMDVM_SET_MODE, &[MMDVM_MODE_IDLE]);
 
-        // TODO: Check command response is ACK (ok)
         _ = self.read_result();
     }
 }
