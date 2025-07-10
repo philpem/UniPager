@@ -20,6 +20,7 @@ futures = "^0.3"
 futures-core = "^0.3"
 futures-util = "^0.3"
 futures-timer = "^3.0.1"
+serialport = { version = "^3.2", default-features = false }
 
 [dependencies.tokio]
 version = "^1.15.0"

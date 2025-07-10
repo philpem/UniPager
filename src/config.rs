@@ -78,6 +78,24 @@ impl Default for RFM69Config {
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(default)]
+pub struct MMDVMConfig {
+    pub port: String,
+    pub inverted: bool,
+    pub level: f32
+}
+
+impl Default for MMDVMConfig {
+    fn default() -> MMDVMConfig {
+        MMDVMConfig { 
+            port: String::from("/dev/ttyAMA0"),
+            inverted: false,
+            level: 50.0
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(default)]
 pub struct AudioConfig {
     #[serde(default)]
     pub device: String,
@@ -172,6 +190,7 @@ pub enum Transmitter {
     Raspager,
     Raspager2,
     RFM69,
+    MMDVM
 }
 
 impl Default for Transmitter {
@@ -189,6 +208,7 @@ impl fmt::Display for Transmitter {
             Transmitter::Raspager => "Raspager1",
             Transmitter::Raspager2 => "Raspager2",
             Transmitter::RFM69 => "RFM69",
+            Transmitter::MMDVM => "MMDVM"
         };
         write!(f, "{}", name)
     }
@@ -204,6 +224,7 @@ pub struct Config {
     pub c9000: C9000Config,
     pub audio: AudioConfig,
     pub rfm69: RFM69Config,
+    pub mmdvm: MMDVMConfig
 }
 
 pub fn get() -> Config {
