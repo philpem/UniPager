@@ -87,7 +87,7 @@ impl MMDVMTransmitter {
     pub fn new(config: &Config) -> MMDVMTransmitter {
         info!("Initializing MMDVM transmitter...");
 
-        let mut serial = serial::open(&config.rfm69.port).expect(
+        let mut serial = serial::open(&config.mmdvm.port).expect(
             "Unable to open serial port"
         );
 
