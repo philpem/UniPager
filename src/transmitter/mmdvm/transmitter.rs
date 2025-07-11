@@ -3,7 +3,7 @@ use crate::transmitter::Transmitter;
 use std::fmt;
 use std::time::Duration;
 use std::thread;
-use serialport::prelude::*;
+use serial::{self, SerialPort};
 use std::str;
 
 // Frame start byte
@@ -56,7 +56,7 @@ impl fmt::Display for MmdvmNackReason {
             MmdvmNackReason::CommandTooLong => "Command too long".to_owned(),
             MmdvmNackReason::DataIncorrect => "Data incorrect".to_owned(),
             MmdvmNackReason::BufferFull => "Buffer full, enhance your calm".to_owned(),
-            MmdvmNackReason::Unknown(val) => format!("Unknown NACK reason, value {val}")
+            MmdvmNackReason::Unknown(val) => format!("Unknown NACK reason, value {:?}", val)
         };
         write!(f, "{}", name)
     }
@@ -65,7 +65,7 @@ impl std::error::Error for MmdvmNackReason {}
 
 
 pub struct MMDVMTransmitter {
-    serial: Box<dyn SerialPort>
+    serial: Box<serial::SerialPort>
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -87,14 +87,24 @@ impl MMDVMTransmitter {
     pub fn new(config: &Config) -> MMDVMTransmitter {
         info!("Initializing MMDVM transmitter...");
 
-        let mut settings: SerialPortSettings = Default::default();
-        settings.timeout = Duration::from_millis(500);
-        settings.baud_rate = 115200;
+        let mut serial = serial::open(&config.rfm69.port).expect(
+            "Unable to open serial port"
+        );
 
-        let serial = serialport::open_with_settings(&config.mmdvm.port, &settings)
-            .expect("Unable to open serial port");
+        serial
+            .configure(&serial::PortSettings {
+                baud_rate: serial::BaudRate::Baud115200,
+                char_size: serial::CharSize::Bits8,
+                parity: serial::Parity::ParityNone,
+                stop_bits: serial::StopBits::Stop1,
+                flow_control: serial::FlowControl::FlowNone
+            })
+            .expect("Unable to configure serial port");
 
-        let mut tx = MMDVMTransmitter { serial: serial };
+        serial.set_timeout(Duration::from_millis(500))
+            .expect("Unable to set serial port timeout");
+
+        let mut tx = MMDVMTransmitter { serial: Box::new(serial) };
         tx.init(config);
         tx
     }
@@ -109,7 +119,7 @@ impl MMDVMTransmitter {
         self.send_cmd(MMDVM_GET_VERSION, &[]);
 
         if let Ok(ResponseCode::VersionString { desc, version }) = self.read_result() {
-            info!("Connected to MMDVM with protocol version {version}: '{desc}'");
+            info!("Connected to MMDVM with protocol version {:?}: '{:?}'", version, desc);
         } else {
             error!("Error when reading from the MMDVM");
         }
@@ -167,7 +177,7 @@ impl MMDVMTransmitter {
             0x2C, 0xAD, 0x39, 0x1A,
         ]);
 
-        _ = self.read_result();
+        let _ = self.read_result();
     }
 
     pub fn send_cmd(&mut self, cmd: u8, data: &[u8]) {
@@ -220,12 +230,18 @@ impl MMDVMTransmitter {
             // It's a Version String, we accept this
             [MMDVM_FRAME_START, length, MMDVM_GET_VERSION] => *length as usize,
             // It's not valid  
-            _ => return Err(ResponseFailure::InvalidData(buffer.into()))
+            _ => {
+                let mut b: Vec<u8> = Vec::new();
+                b.extend_from_slice(&buffer);
+                return Err(ResponseFailure::InvalidData(b))
+            }
         };
                
         // Check the length is valid: should be at least 3 bytes (FRAME_START, length, code)
         if final_length_needed < 3 {
-            return Err(ResponseFailure::InvalidData(buffer.into()));
+            let mut b: Vec<u8> = Vec::new();
+            b.extend_from_slice(&buffer);
+            return Err(ResponseFailure::InvalidData(b));
         }
 
         // Packet header (and thus the length) seems to be valid, read the payload
@@ -252,24 +268,28 @@ impl MMDVMTransmitter {
             }
             [MMDVM_FRAME_START, _, MMDVM_NACK, ftype, nack_code] => {
                 let nack = MmdvmNackReason::from(*nack_code);
-                warn!("Received NACK ({:?}): {nack_code} => {nack}", ftype);
+                warn!("Received NACK ({:?}): {:?} => {:?}", ftype, nack_code, nack);
                 Err(ResponseFailure::Nack(*ftype, nack))
                 
             }
             [MMDVM_FRAME_START, _, MMDVM_NACK, ftype] => {
                 warn!("Received NACK ({:?}) without a reason code?! (Protocol Violation!)", ftype);
-                Err(ResponseFailure::InvalidData(buffer.into()))
+                let mut b: Vec<u8> = Vec::new();
+                b.extend_from_slice(&buffer);
+                Err(ResponseFailure::InvalidData(b))
             }
-            [MMDVM_FRAME_START, _, MMDVM_GET_VERSION, version, text @ .. ] => {
+            [MMDVM_FRAME_START, _, MMDVM_GET_VERSION, version] => {
 
-                let text: &str = str::from_utf8(&text).unwrap();
+                let text: &str = str::from_utf8(&buffer[4..]).unwrap();
                 let desc: String  = text.to_owned();
                 
                 Ok(ResponseCode::VersionString{version: *version, desc: desc})
             }
             _ => {
                 warn!("READ_RESULT: Unknown frame received, buffer is {}", String::from_utf8_lossy(&buffer));
-                Err(ResponseFailure::InvalidData(buffer.into()))
+                let mut b: Vec<u8> = Vec::new();
+                b.extend_from_slice(&buffer);
+                Err(ResponseFailure::InvalidData(b))
             }
         }  
     }

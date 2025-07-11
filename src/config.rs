@@ -211,7 +211,7 @@ pub struct Config {
     pub raspager: RaspagerConfig,
     pub c9000: C9000Config,
     pub audio: AudioConfig,
-    pub rfm69: RFM69Config
+    pub rfm69: RFM69Config,
     pub mmdvm: MMDVMConfig
 }
 
