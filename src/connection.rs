@@ -69,7 +69,7 @@ impl Connection {
 
     pub fn start(config: Config, scheduler: Scheduler)
         -> (Sender<()>, JoinHandle<()>) {
-        let (stop_tx, stop_rx) = channel();
+        let (outside_stop_tx, outside_stop_rx) = channel();
 
         let handle = thread::spawn(move || {
             let mut reconnect = true;
@@ -138,14 +138,14 @@ impl Connection {
                 };
 
                 if reconnect {
-                    if let Ok(()) = stop_rx.recv_timeout(delay) {
+                    if let Ok(()) = outside_stop_rx.recv_timeout(delay) {
                         reconnect = false;
                     }
                 }
             }
         });
 
-        (stop_tx, handle)
+        (outside_stop_tx, handle)
     }
 
     pub fn run(&mut self) -> Result<()> {
