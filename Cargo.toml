@@ -4,7 +4,7 @@ version = "1.0.5"
 authors = ["Thomas Gatzweiler <mail@thomasgatzweiler.com>"]
 
 [dependencies]
-log = "^0.4"
+log = {version  = "^0.4", features=["std"] }
 serial = "^0.4"
 ws = "^0.7"
 tiny_http = "^0.12.0"
