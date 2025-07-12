@@ -325,7 +325,7 @@ impl MMDVMTransmitter {
                 let desc: String  = text.to_owned();
                 Ok(ResponseCode::VersionString{version: *version, desc: desc})
             }
-            [MMDVM_FRAME_START, length, MMDVM_GET_STATUS, proto] => {
+            [MMDVM_FRAME_START, _, MMDVM_GET_STATUS, proto] => {
                 Ok(ResponseCode::Status{protocols: *proto, modem_state: buffer[4], flags: buffer[5], space: buffer[6..bytes_received].to_vec()})
             }
             _ => {
@@ -393,7 +393,6 @@ impl Transmitter for MMDVMTransmitter {
                 // send the buffer
                 let mut result = Err(ResponseFailure::Nack(0, MmdvmNackReason::BufferFull));
                 while let Err(ResponseFailure::Nack(_, MmdvmNackReason::BufferFull)) = result {
-                    info!("tx");
                     self.send_cmd(MMDVM_POCSAG_DATA, &buffer);
 
                     // We expect either nothing, or a NACK (buffer full)
@@ -401,9 +400,6 @@ impl Transmitter for MMDVMTransmitter {
                     // TODO: Error check
                     info!("tx resp {:?}", result);
                 }
-
-                self.send_cmd(MMDVM_GET_STATUS, &[]);
-                info!("Get Status response: {:?}", self.read_result(false));
             }
             else {
                 break;
