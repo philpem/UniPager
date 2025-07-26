@@ -106,20 +106,17 @@ impl Connection {
                         stopped_tx.send(()).unwrap();
                     });
 
-                    if let Ok(_) = outside_stop_rx.try_recv() {
-                        reconnect = false
-                    }
-                    else if let Ok(_) = stopped_rx.recv() {
-                        reconnect = true
-                    }
-                    if let Ok(_) = outside_stop_rx.try_recv() {
-                        reconnect = false
+                    loop {
+                        if let Ok(_) = outside_stop_rx.try_recv() {
+                            reconnect = false;
+                            break
+                        }
+                        else if let Ok(_) = stopped_rx.recv_timeout(Duration::from_millis(500)) {
+                            reconnect = true;
+                            break
+                        }
                     }
 
-                    //select! {
-                    //     _ = stopped_rx.recv() => reconnect = true,
-                    //     _ = outside_stop_rx.recv() => reconnect = false, //}
-                    // }
 
                     stream.shutdown(Shutdown::Both).ok();
                     handle.join().unwrap();
