@@ -12,7 +12,14 @@ enum State {
     Preamble,
     AddressWord,
     MessageWord(usize, Encoding),
-    Completed
+    // Fill the rest of the current batch with idles, then transition to
+    // Terminator on the batch boundary.
+    Completed,
+    // Emit idle words in a final batch following a trailing sync word, then
+    // end the iterator. Guarantees at least one full sync+idle batch follows
+    // the last message word so receivers see a clear end-of-message and the
+    // carrier stays up long enough to commit it.
+    Terminator
 }
 
 /// POCSAG Generator
@@ -28,9 +35,7 @@ pub struct Generator<'a> {
     // Number of codewords left in current batch
     codewords: u8,
     // Number of codewords generated
-    count: usize,
-    // Number of terminator (sync + idle) batches emitted after completion
-    idle_batches_sent: u8
+    count: usize
 }
 
 impl<'a> Generator<'a> {
@@ -42,8 +47,7 @@ impl<'a> Generator<'a> {
             messages,
             message: Some(first_msg),
             codewords: PREAMBLE_LENGTH,
-            count: 0,
-            idle_batches_sent: 0
+            count: 0
         }
     }
 
@@ -57,10 +61,7 @@ impl<'a> Generator<'a> {
 
         match self.message
         {
-            Some(_) => {
-                self.idle_batches_sent = 0;
-                State::AddressWord
-            }
+            Some(_) => State::AddressWord,
             None => State::Completed,
         }
     }
@@ -97,17 +98,14 @@ impl<'a> Iterator for Generator<'a> {
 
         match (self.codewords, self.state)
         {
-            // Stop only after at least one full terminator batch (sync + 16
-            // idles) has followed the last message word. This guarantees
-            // receivers see a non-message-word codeword after the final
-            // message word and have carrier stability to commit it.
-            (0, State::Completed) if self.idle_batches_sent > 0 => None,
+            // Terminator batch finished: end the iterator.
+            (0, State::Terminator) => None,
 
-            // End of batch in the completed state: emit one trailing sync
-            // word and begin a terminator batch of 16 idle words.
+            // End of the last batch with a pending message-end: emit the
+            // trailing sync word and enter the terminator batch.
             (0, State::Completed) => {
                 self.codewords = 16;
-                self.idle_batches_sent += 1;
+                self.state = State::Terminator;
                 Some(SYNC_WORD)
             }
 
@@ -224,8 +222,9 @@ impl<'a> Iterator for Generator<'a> {
                 Some(parity(crc(0x80000000 | (codeword << 11))))
             }
 
-            // Everything is done. Send idle words until the batch is complete.
-            (_, State::Completed) => {
+            // No more messages. Fill the rest of the current batch (Completed)
+            // or the terminator batch (Terminator) with idle words.
+            (_, State::Completed) | (_, State::Terminator) => {
                 self.codewords -= 1;
                 Some(IDLE_WORD)
             }
