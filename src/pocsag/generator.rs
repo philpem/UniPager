@@ -28,7 +28,9 @@ pub struct Generator<'a> {
     // Number of codewords left in current batch
     codewords: u8,
     // Number of codewords generated
-    count: usize
+    count: usize,
+    // Number of terminator (sync + idle) batches emitted after completion
+    idle_batches_sent: u8
 }
 
 impl<'a> Generator<'a> {
@@ -40,7 +42,8 @@ impl<'a> Generator<'a> {
             messages,
             message: Some(first_msg),
             codewords: PREAMBLE_LENGTH,
-            count: 0
+            count: 0,
+            idle_batches_sent: 0
         }
     }
 
@@ -54,7 +57,10 @@ impl<'a> Generator<'a> {
 
         match self.message
         {
-            Some(_) => State::AddressWord,
+            Some(_) => {
+                self.idle_batches_sent = 0;
+                State::AddressWord
+            }
             None => State::Completed,
         }
     }
@@ -91,8 +97,19 @@ impl<'a> Iterator for Generator<'a> {
 
         match (self.codewords, self.state)
         {
-            // Stop if no codewords are left and everything is completed.
-            (0, State::Completed) => None,
+            // Stop only after at least one full terminator batch (sync + 16
+            // idles) has followed the last message word. This guarantees
+            // receivers see a non-message-word codeword after the final
+            // message word and have carrier stability to commit it.
+            (0, State::Completed) if self.idle_batches_sent > 0 => None,
+
+            // End of batch in the completed state: emit one trailing sync
+            // word and begin a terminator batch of 16 idle words.
+            (0, State::Completed) => {
+                self.codewords = 16;
+                self.idle_batches_sent += 1;
+                Some(SYNC_WORD)
+            }
 
             // The preamble is completed.
             // Send the sync word and start a new batch with 16 codewords.
@@ -211,6 +228,68 @@ impl<'a> Iterator for Generator<'a> {
             (_, State::Completed) => {
                 self.codewords -= 1;
                 Some(IDLE_WORD)
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::message::{Message as OuterMessage, MessageProvider};
+    use crate::pocsag::{Message, MessageType};
+
+    struct EmptyProvider;
+
+    impl MessageProvider for EmptyProvider {
+        fn next(&mut self, _count: usize) -> Option<OuterMessage> {
+            None
+        }
+    }
+
+    fn collect_all(ric: u32, length: usize) -> Vec<u32> {
+        let data: String = std::iter::repeat('A').take(length).collect();
+        let msg = Message {
+            mtype: MessageType::AlphaNum,
+            speed: 1200,
+            ric,
+            func: 3,
+            data,
+        };
+        let mut provider = EmptyProvider;
+        Generator::new(&mut provider, msg).collect()
+    }
+
+    #[test]
+    fn terminator_follows_last_message_word() {
+        for length in 1..=60usize {
+            for ric_lower in 0..=7u32 {
+                // Build a RIC where the lower three bits vary; the upper bits
+                // are arbitrary but valid.
+                let ric = 0x0010_0000 | ric_lower;
+                let cws = collect_all(ric, length);
+
+                assert!(!cws.is_empty(),
+                    "no codewords produced (length={}, ric_lower={})",
+                    length, ric_lower);
+
+                // The final codeword in the stream must not be a message word.
+                let last = *cws.last().unwrap();
+                assert_eq!(last & 0x80000000, 0,
+                    "last codeword is a message word \
+                     (length={}, ric_lower={}, last=0x{:08X})",
+                    length, ric_lower, last);
+
+                // At least one IDLE_WORD must appear between the last message
+                // word in the stream and the end.
+                let last_msg_idx = cws.iter()
+                    .rposition(|&w| w & 0x80000000 != 0)
+                    .expect("stream must contain at least one message word");
+                let after = &cws[last_msg_idx + 1..];
+                assert!(after.iter().any(|&w| w == IDLE_WORD),
+                    "no idle word follows the last message word \
+                     (length={}, ric_lower={}, tail_len={})",
+                    length, ric_lower, after.len());
             }
         }
     }
